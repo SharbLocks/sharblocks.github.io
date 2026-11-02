@@ -422,9 +422,59 @@ if next_week:
                             "strengths": st[:4], "weaknesses": wk[:3], "oppWeak": dw[:4], "oppStrong": ds[:3],
                             "watch": watch.get(o, {}).get("run" if pos == "RB" else "rush" if pos == "QB" else "cov", [])}
 
+# ---------------- game totals ----------------
+totals = []
+if next_week and len(done):
+    def team_games(t):
+        rows = []
+        for _, gm in done.sort_values(["week"]).iterrows():
+            if gm.home_team == t: rows.append((gm.home_score, gm.away_score))
+            elif gm.away_team == t: rows.append((gm.away_score, gm.home_score))
+        return rows
+    lg_ppg = float(np.mean([v for _, gm in done.iterrows() for v in (gm.home_score, gm.away_score)]))
+    lg_off = float(np.mean([teams[t]["off"] for t in teams])); lg_def = float(np.mean([teams[t]["def"] for t in teams]))
+    ppl = plays.groupby(["posteam", "game_id"]).size().groupby("posteam").mean().to_dict()
+    lg_pace = float(np.mean(list(ppl.values())))
+    form = {}
+    for t in teams:
+        tg = team_games(t)
+        pf = np.array([a for a, b in tg], float); pa = np.array([b for a, b in tg], float)
+        form[t] = {"pf": 0.65 * pf.mean() + 0.35 * pf[-3:].mean(), "pa": 0.65 * pa.mean() + 0.35 * pa[-3:].mean(),
+                   "pf_s": pf.mean(), "pa_s": pa.mean(), "pf3": pf[-3:].mean(), "tot": (pf + pa)}
+    def team_pts(a, b, home):
+        A, Bt = teams[a], teams[b]
+        base = 0.5 * (form[a]["pf"] + form[b]["pa"])
+        epa_pts = lg_ppg + 30 * ((A["off"] - lg_off) + (Bt["def"] - lg_def))
+        pace = ((ppl.get(a, lg_pace) + ppl.get(b, lg_pace)) / 2) / lg_pace
+        p = (0.6 * base + 0.4 * epa_pts) * (1 + 0.5 * (pace - 1)) + (1.0 if home else -0.5)
+        return max(9.0, min(40.0, p))
+    SD = 13.5
+    for g_ in sched:
+        a, h = g_["away"], g_["home"]
+        if a not in teams or h not in teams: continue
+        pa_, ph_ = team_pts(a, h, False), team_pts(h, a, True)
+        tot = pa_ + ph_; line = round(tot * 2) / 2
+        over_l = np.floor(tot - 5) + 0.5; under_l = np.ceil(tot + 5) - 0.5
+        p_over = 1 - Phi((over_l - tot) / SD); p_under = Phi((under_l - tot) / SD)
+        hist = np.concatenate([form[a]["tot"], form[h]["tot"]])
+        A, H = teams[a], teams[h]
+        rs = [f"{a} scores {form[a]['pf_s']:.1f}/game (last 3: {form[a]['pf3']:.1f}); {h} allows {form[h]['pa_s']:.1f}",
+              f"{h} scores {form[h]['pf_s']:.1f}/game (last 3: {form[h]['pf3']:.1f}); {a} allows {form[a]['pa_s']:.1f}",
+              f"Offense ranks: {a} #{A['off_rk']}, {h} #{H['off_rk']} · Defense ranks: {a} #{A['def_rk']}, {h} #{H['def_rk']}",
+              f"Their games average {hist.mean():.1f} total points; {int((hist > line).sum())} of {len(hist)} went over {line:g}"]
+        pace_ = ((ppl.get(a, lg_pace) + ppl.get(h, lg_pace)) / 2)
+        if pace_ > lg_pace * 1.03: rs.append(f"Fast pace: {pace_:.0f} plays per team per game (league {lg_pace:.0f})")
+        elif pace_ < lg_pace * 0.97: rs.append(f"Slow pace: {pace_:.0f} plays per team per game (league {lg_pace:.0f})")
+        if A["def_rk"] <= 8 and H["def_rk"] <= 8: rs.append("Two top-8 defenses, which leans under")
+        if A["off_rk"] <= 8 and H["off_rk"] <= 8: rs.append("Two top-8 offenses, which leans over")
+        totals.append({"away": a, "home": h, "week": g_.get("week"), "day": g_["day"], "awayPts": r(pa_), "homePts": r(ph_),
+                       "total": r(tot), "line": line, "spread": r(ph_ - pa_), "range": [int(round(tot - 0.67 * SD)), int(round(tot + 0.67 * SD))],
+                       "over": {"line": float(over_l), "prob": r(p_over * 100, 0)}, "under": {"line": float(under_l), "prob": r(p_under * 100, 0)},
+                       "reasons": rs})
+
 out = {"season": SEASON, "lastWeek": last_week, "nextWeek": next_week,
        "updated": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-       "keys": KEYS, "players": players, "teams": teams, "matchups": matchups, "schedule": sched, "props": props, "proj": projections,
+       "keys": KEYS, "players": players, "teams": teams, "matchups": matchups, "schedule": sched, "props": props, "proj": projections, "totals": totals,
        "lg": {c: {k: r(v, 3) for k, v in d.items()} for c, d in lg.items()}}
 js = json.dumps(out, separators=(",", ":"), allow_nan=False, default=str)
 with open(os.path.join(OUT, "data.json"), "w") as f: f.write(js)
