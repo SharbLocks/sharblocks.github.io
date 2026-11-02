@@ -1,0 +1,28 @@
+name: Weekly stats update
+on:
+  schedule:
+    - cron: "17 13 * * 2"   # Tuesdays ~8:17am Eastern
+  workflow_dispatch: {}      # lets you run it by hand from the Actions tab
+permissions:
+  contents: write
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pandas pyarrow
+      - name: Build stats
+        run: |
+          M=$(date +%m); Y=$(date +%Y)
+          if [ "$M" -le 2 ]; then Y=$((Y-1)); fi
+          python build_data.py "$Y" .
+      - name: Commit
+        run: |
+          git config user.name "sharblocks-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add index.html
+          git diff --cached --quiet || git commit -m "Weekly stats update"
+          git push
