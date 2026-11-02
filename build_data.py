@@ -194,11 +194,13 @@ LBL = {"short": "short", "mid": "intermediate", "deep": "deep",
        "inside": "inside runs", "tackle": "off-tackle runs", "outside": "outside runs"}
 matchups = []; sched = []
 if next_week:
-    wk = games[(games.week == next_week) & games.result.isna()]
-    opp = {}
+    # every unplayed game up to and including next week (e.g. tonight's MNF + next week)
+    wk = games[games.result.isna() & (games.week <= next_week)].sort_values(["gameday", "gametime"])
+    opp = {}; gweek = {}
     for _, gm in wk.iterrows():
-        opp[gm.home_team] = gm.away_team; opp[gm.away_team] = gm.home_team
-        sched.append({"away": gm.away_team, "home": gm.home_team, "day": gm.gameday, "time": gm.gametime})
+        sched.append({"away": gm.away_team, "home": gm.home_team, "day": gm.gameday, "time": gm.gametime, "week": int(gm.week)})
+        for a_, b_ in ((gm.home_team, gm.away_team), (gm.away_team, gm.home_team)):
+            if a_ not in opp: opp[a_] = b_; gweek[a_] = int(gm.week)  # a team's next game comes first
     pbyid = {p["id"]: p for p in players}
     for p in players:
         o = opp.get(p["team"])
@@ -276,7 +278,9 @@ team_last = pw.groupby("team").week.max().to_dict()
 props = []
 if next_week:
     opp_of = {}; home_of = {}
-    for g_ in sched: opp_of[g_["home"]] = g_["away"]; opp_of[g_["away"]] = g_["home"]; home_of[g_["home"]] = True; home_of[g_["away"]] = False
+    for g_ in sched:
+        for a_, b_, h_ in ((g_["home"], g_["away"], True), (g_["away"], g_["home"], False)):
+            if a_ not in opp_of: opp_of[a_] = b_; home_of[a_] = h_
     mu_by = {m["id"]: m for m in matchups}
     PL = {"QB": "QBs", "RB": "RBs", "WR": "WRs", "TE": "TEs"}
     for pid, g in pw.groupby("player_id"):
@@ -341,7 +345,7 @@ if next_week:
             if risk is None and rk_ and rk_ <= 8: risk = f"{o} is one of the stingier defenses vs {PL[pos]}"
             if risk is None and last3 < 0.8 * mean: risk = f"Trending down lately ({last3:.1f} over the last 3)"
             props.append({"id": pid, "name": L.player_display_name, "pos": L.position, "team": tm_, "opp": o,
-                          "home": home_of[tm_], "stat": sk, "label": lab, "line": T, "proj": r(proj, 1),
+                          "home": home_of[tm_], "week": gweek.get(tm_), "stat": sk, "label": lab, "line": T, "proj": r(proj, 1),
                           "prob": r(prob * 100, 0), "hits": hits, "n": n, "reasons": reasons, "risk": risk})
     # keep the best 2 props per player
     props.sort(key=lambda x: -x["prob"])
@@ -414,7 +418,7 @@ if next_week:
             if P["tot"]["sk"] / max(P["gp"], 1) >= 3: wk.append(f"Sacked {P['tot']['sk'] / P['gp']:.1f} times a game")
         dw = [n[2:] for n in (mu or {}).get("notes", []) if n.startswith("+")]
         ds = [n[2:] for n in (mu or {}).get("notes", []) if n.startswith("−")]
-        projections[pid] = {"opp": o, "home": home_of[tm_], "edge": edge, "stats": stats,
+        projections[pid] = {"opp": o, "home": home_of[tm_], "week": gweek.get(tm_), "edge": edge, "stats": stats,
                             "strengths": st[:4], "weaknesses": wk[:3], "oppWeak": dw[:4], "oppStrong": ds[:3],
                             "watch": watch.get(o, {}).get("run" if pos == "RB" else "rush" if pos == "QB" else "cov", [])}
 
