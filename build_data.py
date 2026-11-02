@@ -351,9 +351,76 @@ if next_week:
         if c_ < 2: kept.append(p_); seen[p_["id"]] = c_ + 1
     props = kept
 
+# ---------------- full projections for next week ----------------
+projections = {}
+if next_week:
+    PCOLS = {"QB": [("pyd","passing_yards"),("ptd","passing_tds"),("int","passing_interceptions"),("car","carries"),("ryd","rushing_yards")],
+             "RB": [("car","carries"),("ryd","rushing_yards"),("rtd","rushing_tds"),("tgt","targets"),("rec","receptions"),("recyd","receiving_yards")],
+             "WR": [("tgt","targets"),("rec","receptions"),("recyd","receiving_yards"),("rectd","receiving_tds"),("ryd","rushing_yards")],
+             "TE": [("tgt","targets"),("rec","receptions"),("recyd","receiving_yards"),("rectd","receiving_tds")]}
+    pinfo = {p["id"]: p for p in players}
+    # defenders to watch on each team
+    watch = {}
+    for t in TEAMS:
+        roster_ = [p for p in players if p["team"] == t]
+        dbs = sorted([p for p in roster_ if p["grp"] == "DB"], key=lambda p: -(p["tot"]["dint"] * 3 + p["tot"]["pd"]))[:3]
+        rush_ = sorted([p for p in roster_ if p["grp"] in ("DL", "LB")], key=lambda p: -(p["tot"]["sacks"] * 3 + p["tot"]["qbh"]))[:2]
+        tack = sorted([p for p in roster_ if p["grp"] in ("LB", "DL")], key=lambda p: -(p["tot"]["tfl"] * 3 + p["tot"]["tkl"] + p["tot"]["ast"] * 0.5))[:2]
+        fm = lambda p, kind: {"id": p["id"], "name": p["name"], "pos": p["pos"],
+            "line": (f"{int(p['tot']['dint'])} INT · {int(p['tot']['pd'])} PD" if kind == "cov" else
+                     f"{p['tot']['sacks']:g} sacks · {int(p['tot']['qbh'])} QB hits" if kind == "rush" else
+                     f"{int(p['tot']['tkl'] + p['tot']['ast'])} tkl · {int(p['tot']['tfl'])} TFL")}
+        watch[t] = {"cov": [fm(p, "cov") for p in dbs], "rush": [fm(p, "rush") for p in rush_], "run": [fm(p, "run") for p in tack]}
+    mu_by = {m["id"]: m for m in matchups}
+    for pid, g in pw.groupby("player_id"):
+        L = latest.loc[pid]; pos = L.position_group; tm_ = L.team
+        if pos not in PCOLS or tm_ not in opp_of: continue
+        g = g[g.team == tm_].sort_values("week")
+        if len(g) < 2 or g.week.max() != team_last.get(tm_): continue
+        if pos == "QB" and g.attempts.mean() < 15: continue
+        if pos != "QB" and (g.targets.mean() + g.carries.mean()) < 2.5: continue
+        o = opp_of[tm_]; mu = mu_by.get(pid); edge = (mu or {}).get("edge") or 0
+        zf = 1 + max(-0.12, min(0.12, edge / 400))  # strengths-vs-weaknesses tilt
+        stats = {}
+        for k, col in PCOLS[pos]:
+            v = g[col].astype(float).values
+            base = 0.6 * v.mean() + 0.4 * v[-3:].mean()
+            if base < 0.05 and k in ("ryd", "car"): continue
+            try: fac = max(0.82, min(1.18, 1 + 0.5 * (allow.loc[(o, pos), col] / lg_allow.loc[pos, col] - 1)))
+            except Exception: fac = 1.0
+            f2 = fac * (zf if k not in ("car", "tgt", "int") else 1 + (zf - 1) * 0.4)
+            pj = base * max(0.75, min(1.25, f2))
+            sd = max(v.std(ddof=1) if len(v) > 1 else 0, 0.3 * max(base, 0.01))
+            stats[k] = [r(pj, 1), r(max(0, pj - 0.67 * sd), 0 if pj > 5 else 1), r(pj + 0.67 * sd, 0 if pj > 5 else 1)]
+        # strengths & weaknesses
+        P = pinfo.get(pid, {}); st = []; wk = []
+        R = P.get("recv"); RU = P.get("rush"); Q = P.get("qb")
+        if R and pos != "QB" and R["n"] >= 15:
+            if (R["depth"].get("deep") or 0) >= 25: st.append(f"Deep threat: {int(R['depth']['deep'])}% of targets 20+ yards")
+            if (R["depth"].get("short") or 0) >= 60: st.append(f"Short-area target: {int(R['depth']['short'])}% of targets under 10 yards")
+            if (R.get("yac") or 0) >= 5.5: st.append(f"Yards after catch: {R['yac']} per catch")
+            if (R.get("catch") or 0) >= 75: st.append(f"Sure hands: {int(R['catch'])}% catch rate")
+            if (R.get("catch") or 100) < 58: wk.append(f"Low catch rate: {int(R['catch'])}%")
+        if RU and pos in ("RB", "QB") and RU["n"] >= 20:
+            z = max(RU["zone"], key=lambda k_: RU["zone"][k_] or 0)
+            st.append(f"Runs mostly {({'inside':'inside','tackle':'off tackle','outside':'outside'})[z]} ({int(RU['zone'][z])}%)")
+            if (RU.get("explosive") or 0) >= 14: st.append(f"Big-play runner: {int(RU['explosive'])}% of runs go 10+")
+            if (RU.get("stuff") or 0) >= 22: wk.append(f"Gets stuffed on {int(RU['stuff'])}% of runs")
+        if Q:
+            dz = Q["depth"]
+            if (dz.get("deep", {}).get("pct") or 0) >= 13: st.append(f"Throws deep {int(dz['deep']['pct'])}% of the time ({int(dz['deep'].get('cmp') or 0)}% complete)")
+            if (dz.get("deep", {}).get("cmp") or 100) < 30: wk.append(f"Struggles deep: {int(dz['deep']['cmp'])}% complete on 20+ yd throws")
+            if P["tot"]["int"] / max(P["gp"], 1) >= 1: wk.append(f"Turnover prone: {int(P['tot']['int'])} INTs")
+            if P["tot"]["sk"] / max(P["gp"], 1) >= 3: wk.append(f"Sacked {P['tot']['sk'] / P['gp']:.1f} times a game")
+        dw = [n[2:] for n in (mu or {}).get("notes", []) if n.startswith("+")]
+        ds = [n[2:] for n in (mu or {}).get("notes", []) if n.startswith("−")]
+        projections[pid] = {"opp": o, "home": home_of[tm_], "edge": edge, "stats": stats,
+                            "strengths": st[:4], "weaknesses": wk[:3], "oppWeak": dw[:4], "oppStrong": ds[:3],
+                            "watch": watch.get(o, {}).get("run" if pos == "RB" else "rush" if pos == "QB" else "cov", [])}
+
 out = {"season": SEASON, "lastWeek": last_week, "nextWeek": next_week,
        "updated": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-       "keys": KEYS, "players": players, "teams": teams, "matchups": matchups, "schedule": sched, "props": props,
+       "keys": KEYS, "players": players, "teams": teams, "matchups": matchups, "schedule": sched, "props": props, "proj": projections,
        "lg": {c: {k: r(v, 3) for k, v in d.items()} for c, d in lg.items()}}
 js = json.dumps(out, separators=(",", ":"), allow_nan=False, default=str)
 with open(os.path.join(OUT, "data.json"), "w") as f: f.write(js)
